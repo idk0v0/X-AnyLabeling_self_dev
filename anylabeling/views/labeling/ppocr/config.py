@@ -1,0 +1,119 @@
+from __future__ import annotations
+
+from dataclasses import dataclass
+
+DEFAULT_WINDOW_TITLE = "PaddleOCR"
+DEFAULT_WINDOW_SIZE = (1560, 920)
+LEFT_PANEL_WIDTH = 240
+MIN_DIALOG_WIDTH = 1200
+MIN_DIALOG_HEIGHT = 760
+
+PPOCR_ROOT_DIRNAME = "xanylabeling_data/paddleocr"
+PPOCR_FILES_DIRNAME = "files"
+PPOCR_JSONS_DIRNAME = "jsons"
+PPOCR_PDF_DIR_PREFIX = "__PDF_"
+PPOCR_BLOCK_IMAGES_DIR_PREFIX = "__BLOCK_IMAGES_"
+
+PPOCR_STATUS_PENDING = "pending"
+PPOCR_STATUS_PARSED = "parsed"
+PPOCR_STATUS_ERROR = "error"
+PPOCR_RUNTIME_STATUS_PARSING = "parsing"
+
+PPOCR_FILE_TYPE_IMAGE = "image"
+PPOCR_FILE_TYPE_PDF = "pdf"
+PPOCR_FILE_TYPE_ALL = "all"
+
+PPOCR_SORT_NEWEST = "newest"
+PPOCR_SORT_OLDEST = "oldest"
+
+PPOCR_OFFLINE_MODEL_LABEL = "Offline Mode"
+PPOCR_API_MODEL_ID = "__ppocr_api__"
+PPOCR_API_MODEL_ID_PREFIX = f"{PPOCR_API_MODEL_ID}:"
+PPOCR_API_JOB_URL = "https://paddleocr.aistudio-app.com/api/v2/ocr/jobs"
+PPOCR_API_DEFAULT_MODEL = "PaddleOCR-VL-1.6"
+PPOCR_API_SUPPORTED_MODELS = (
+    "PaddleOCR-VL-1.6",
+    "PaddleOCR-VL",
+)
+PPOCR_API_MODE_ASYNC_JOBS = "async_jobs"
+PPOCR_API_MODEL_LABEL = f"{PPOCR_API_DEFAULT_MODEL} (API)"
+PPOCR_API_MODEL_SERVER_ID = "ppocr_api"
+PPOCR_PIPELINE_CAPABILITY_KEY = "ppocr_pipeline"
+
+PPOCR_SUPPORTED_IMAGE_SUFFIXES = {
+    ".bmp",
+    ".cif",
+    ".gif",
+    ".jpeg",
+    ".jpg",
+    ".png",
+    ".tif",
+    ".tiff",
+    ".webp",
+}
+PPOCR_SUPPORTED_PDF_SUFFIXES = {".pdf"}
+PPOCR_SUPPORTED_SUFFIXES = (
+    PPOCR_SUPPORTED_IMAGE_SUFFIXES | PPOCR_SUPPORTED_PDF_SUFFIXES
+)
+
+PPOCR_BLOCK_CARD_MAX_HEIGHT_PX = 640
+PPOCR_ZOOM_STEP = 0.1
+PPOCR_MIN_ZOOM = 0.2
+PPOCR_MAX_ZOOM = 5.0
+
+PPOCR_COLOR_TEXT = "rgb(70, 88, 255)"
+PPOCR_COLOR_TABLE = "rgb(47, 189, 113)"
+PPOCR_COLOR_IMAGE = "rgb(189, 76, 255)"
+PPOCR_COLOR_HEADER = "rgb(182, 178, 241)"
+PPOCR_COLOR_FORMULA = "rgb(250, 219, 20)"
+PPOCR_COLOR_EDITED = "rgb(255, 156, 40)"
+PPOCR_COLOR_OVERLAY = "rgb(133, 144, 255)"
+
+
+@dataclass(frozen=True)
+class PPOCRPipelineModel:
+    model_id: str
+    display_name: str
+
+
+@dataclass(frozen=True)
+class PPOCRServiceProbe:
+    is_online: bool
+    server_url: str
+    pipeline_model: str
+    pipeline_models: tuple[PPOCRPipelineModel, ...]
+    error_message: str = ""
+
+
+def build_ppocr_api_model_id(api_model: str) -> str:
+    model = str(api_model or "").strip() or PPOCR_API_DEFAULT_MODEL
+    return f"{PPOCR_API_MODEL_ID_PREFIX}{model}"
+
+
+def is_ppocr_api_model_id(model_id: str) -> bool:
+    value = str(model_id or "").strip()
+    return value == PPOCR_API_MODEL_ID or value.startswith(
+        PPOCR_API_MODEL_ID_PREFIX
+    )
+
+
+def normalize_ppocr_api_model(api_model: str) -> str:
+    model = str(api_model or "").strip()
+    if model in PPOCR_API_SUPPORTED_MODELS:
+        return model
+    return PPOCR_API_DEFAULT_MODEL
+
+
+def resolve_ppocr_api_model(model_id: str, fallback: str = "") -> str:
+    value = str(model_id or "").strip()
+    if value.startswith(PPOCR_API_MODEL_ID_PREFIX):
+        return normalize_ppocr_api_model(
+            value[len(PPOCR_API_MODEL_ID_PREFIX) :]
+        )
+    if value == PPOCR_API_MODEL_ID:
+        return normalize_ppocr_api_model(fallback)
+    return normalize_ppocr_api_model(value)
+
+
+def ppocr_api_model_label(api_model: str) -> str:
+    return f"{normalize_ppocr_api_model(api_model)} (API)"

@@ -1,0 +1,813 @@
+import copy
+import math
+
+from PyQt6 import QtCore, QtGui
+
+from . import utils
+from ..labeling.logger import logger
+
+# TODO(unknown):
+# - [opt] Store paths instead of creating new ones at each paint.
+
+
+DEFAULT_LINE_COLOR = QtGui.QColor(0, 255, 0, 128)  # bf hovering
+DEFAULT_FILL_COLOR = QtGui.QColor(100, 100, 100, 100)  # hovering
+DEFAULT_SELECT_LINE_COLOR = QtGui.QColor(255, 255, 255)  # selected
+DEFAULT_SELECT_FILL_COLOR = QtGui.QColor(0, 255, 0, 155)  # selected
+DEFAULT_VERTEX_FILL_COLOR = QtGui.QColor(0, 255, 0, 255)  # hovering
+DEFAULT_HVERTEX_FILL_COLOR = QtGui.QColor(255, 255, 255, 255)  # hovering
+
+
+class Shape:
+    """Shape data type"""
+
+    # Render handles as squares
+    P_SQUARE = 0
+
+    # Render handles as circles
+    P_ROUND = 1
+
+    # Flag for the handles we would move if dragging
+    MOVE_VERTEX = 0
+
+    # Flag for all other handles on the current shape
+    NEAR_VERTEX = 1
+
+    KEYS = [
+        "label",
+        "score",
+        "points",
+        "group_id",
+        "difficult",
+        "shape_type",
+        "flags",
+        "description",
+        "attributes",
+        "kie_linking",
+    ]
+
+    # The following class variables influence the drawing of all shape objects.
+    line_color = DEFAULT_LINE_COLOR
+    fill_color = DEFAULT_FILL_COLOR
+    select_line_color = DEFAULT_SELECT_LINE_COLOR
+    select_fill_color = DEFAULT_SELECT_FILL_COLOR
+    vertex_fill_color = DEFAULT_VERTEX_FILL_COLOR
+    hvertex_fill_color = DEFAULT_HVERTEX_FILL_COLOR
+    point_type = P_ROUND
+    point_size = 4
+    scale = 1.5
+    line_width = 2.0
+    CUBOID_FRONT_LEFT_EDGE_CENTER = 8
+    CUBOID_FRONT_RIGHT_EDGE_CENTER = 9
+    CUBOID_FRONT_TOP_EDGE_CENTER = 10
+    CUBOID_FRONT_BOTTOM_EDGE_CENTER = 11
+    CUBOID_BACK_LEFT_EDGE_CENTER = 12
+    CUBOID_BACK_RIGHT_EDGE_CENTER = 13
+
+    def __init__(
+        self,
+        label=None,
+        score=None,
+        line_color=None,
+        shape_type=None,
+        flags=None,
+        group_id=None,
+        description=None,
+        difficult=False,
+        direction=0,
+        attributes=None,
+        kie_linking=None,
+    ):
+        if attributes is None:
+            attributes = {}
+        if kie_linking is None:
+            kie_linking = []
+        self.label = label
+        self.score = score
+        self.group_id = group_id
+        self.description = description
+        self.difficult = difficult
+        self.kie_linking = kie_linking
+        self.points = []
+        self.fill = False
+        self.hovered = False
+        self.selected = False
+        self.shape_type = shape_type
+        self.flags = flags
+        self.other_data = {}
+        self.attributes = attributes
+        self.cache_label = None
+        self.cache_description = None
+        self.visible = True
+
+        # Rotation setting
+        self.direction = direction
+        self.center = None
+        self.show_degrees = True
+
+        self._highlight_index = None
+        self._highlight_mode = self.NEAR_VERTEX
+        self._highlight_settings = {
+            self.NEAR_VERTEX: (4, self.P_ROUND),
+            self.MOVE_VERTEX: (1.5, self.P_SQUARE),
+        }
+
+        self._vertex_fill_color = None
+
+        self._closed = False
+
+        if line_color is not None:
+            # Override the class line_color attribute
+            # with an object attribute. Currently this
+            # is used for drawing the pending line a different color.
+            self.line_color = line_color
+        self.shape_type = shape_type
+
+    def to_dict(self):
+        if self.shape_type == "cuboid" and len(self.points) >= 8:
+            self.sync_cuboid_depth_vector()
+        dictData = {
+            "label": self.label,
+            "score": self.score,
+            "points": [(p.x(), p.y()) for p in self.points],
+            "group_id": self.group_id,
+            "description": self.description,
+            "difficult": self.difficult,
+            "shape_type": self.shape_type,
+            "flags": self.flags,
+            "attributes": self.attributes,
+            "kie_linking": self.kie_linking,
+        }
+        if self.shape_type == "rotation":
+            dictData["direction"] = self.direction
+        dictData = {
+            **self.other_data,
+            **dictData,
+        }
+        return dictData
+
+    def load_from_dict(self, data: dict, close=True):
+        self.label = data["label"]
+        self.score = data.get("score")
+        self.points = [QtCore.QPointF(p[0], p[1]) for p in data["points"]]
+        self.group_id = data.get("group_id")
+        self.description = data.get("description", "")
+        self.difficult = data.get("difficult", False)
+        self.shape_type = data.get("shape_type", "polygon")
+        self.flags = data.get("flags", {})
+        self.attributes = data.get("attributes", {})
+        self.kie_linking = data.get("kie_linking", [])
+        if self.shape_type == "rotation":
+            self.direction = data.get("direction", 0)
+        self.other_data = {k: v for k, v in data.items() if k not in self.KEYS}
+        if self.shape_type == "cuboid" and "cuboid3d" not in self.other_data:
+            self.sync_cuboid_depth_vector()
+        if close:
+            self.close()
+        return self
+
+    @property
+    def shape_type(self):
+        """Get shape type (polygon, rectangle, rotation, point, line, ...)"""
+        return self._shape_type
+
+    @shape_type.setter
+    def shape_type(self, value):
+        """Set shape type"""
+        if value is None:
+            value = "polygon"
+        if value not in self.get_supported_shape():
+            raise ValueError(f"Unexpected shape_type: {value}")
+        self._shape_type = value
+
+    @staticmethod
+    def get_supported_shape():
+        return [
+            "polygon",
+            "rectangle",
+            "rotation",
+            "quadrilateral",
+            "point",
+            "line",
+            "circle",
+            "linestrip",
+            "cuboid",
+        ]
+
+    def close(self):
+        """Close the shape"""
+        if self.shape_type == "rotation" and len(self.points) == 4:
+            cx = (self.points[0].x() + self.points[2].x()) / 2
+            cy = (self.points[0].y() + self.points[2].y()) / 2
+            self.center = QtCore.QPointF(cx, cy)
+        self._closed = True
+
+    def reach_max_points(self):
+        if self.shape_type == "cuboid":
+            return len(self.points) >= 8
+        if len(self.points) >= 4:
+            return True
+        return False
+
+    def add_point(self, point):
+        """Add a point"""
+        if self.shape_type == "rectangle":
+            if not self.reach_max_points():
+                self.points.append(point)
+        elif self.shape_type == "cuboid":
+            if len(self.points) < 8:
+                self.points.append(point)
+        elif self.shape_type == "quadrilateral":
+            if self.points and point == self.points[0]:
+                self.close()
+            else:
+                self.points.append(point)
+                if len(self.points) == 4:
+                    self.close()
+        else:
+            if self.points and point == self.points[0]:
+                self.close()
+            else:
+                self.points.append(point)
+
+    def can_add_point(self):
+        """Check if shape supports more points"""
+        if self.shape_type in ["polygon", "linestrip"]:
+            return True
+        if self.shape_type == "quadrilateral":
+            return len(self.points) < 4
+        return False
+
+    def get_cuboid_depth_vector(self):
+        cuboid_data = self.other_data.get("cuboid3d", {})
+        if isinstance(cuboid_data, dict):
+            depth_vector = cuboid_data.get("depth_vector", None)
+            if (
+                isinstance(depth_vector, (list, tuple))
+                and len(depth_vector) == 2
+            ):
+                return [float(depth_vector[0]), float(depth_vector[1])]
+        if self.shape_type == "cuboid" and len(self.points) >= 5:
+            return [
+                float(self.points[4].x() - self.points[0].x()),
+                float(self.points[4].y() - self.points[0].y()),
+            ]
+        return [0.0, 0.0]
+
+    def set_cuboid_depth_vector(
+        self,
+        depth_vector,
+        mode="from_rectangle",
+        source="manual",
+    ):
+        self.other_data["cuboid3d"] = {
+            "version": 1,
+            "mode": mode,
+            "vertices2d_order": [
+                "front_tl",
+                "front_tr",
+                "front_br",
+                "front_bl",
+                "back_tl",
+                "back_tr",
+                "back_br",
+                "back_bl",
+            ],
+            "depth_vector": [float(depth_vector[0]), float(depth_vector[1])],
+            "source": source,
+        }
+
+    def sync_cuboid_depth_vector(self):
+        if self.shape_type != "cuboid" or len(self.points) < 5:
+            return
+        depth_vector = [
+            float(self.points[4].x() - self.points[0].x()),
+            float(self.points[4].y() - self.points[0].y()),
+        ]
+        cuboid_data = self.other_data.get("cuboid3d", {})
+        mode = (
+            cuboid_data.get("mode", "from_rectangle")
+            if isinstance(cuboid_data, dict)
+            else "from_rectangle"
+        )
+        source = (
+            cuboid_data.get("source", "manual")
+            if isinstance(cuboid_data, dict)
+            else "manual"
+        )
+        self.set_cuboid_depth_vector(
+            depth_vector=depth_vector,
+            mode=mode,
+            source=source,
+        )
+
+    def get_cuboid_front_center(self):
+        if self.shape_type != "cuboid" or len(self.points) < 4:
+            return QtCore.QPointF()
+        return QtCore.QPointF(
+            (self.points[0].x() + self.points[2].x()) / 2.0,
+            (self.points[0].y() + self.points[2].y()) / 2.0,
+        )
+
+    def get_cuboid_back_center(self):
+        if self.shape_type != "cuboid" or len(self.points) < 8:
+            return QtCore.QPointF()
+        return QtCore.QPointF(
+            (self.points[4].x() + self.points[6].x()) / 2.0,
+            (self.points[4].y() + self.points[6].y()) / 2.0,
+        )
+
+    @staticmethod
+    def get_mid_point(p1, p2):
+        return QtCore.QPointF(
+            (p1.x() + p2.x()) / 2.0,
+            (p1.y() + p2.y()) / 2.0,
+        )
+
+    def get_cuboid_visible_rear_edge_indices(self):
+        if self.shape_type != "cuboid" or len(self.points) < 8:
+            return []
+        depth_vector = self.get_cuboid_depth_vector()
+        if depth_vector[0] >= 0:
+            return [5, 6]
+        return [4, 7]
+
+    def get_cuboid_visible_rear_center_index(self):
+        if self.shape_type != "cuboid" or len(self.points) < 8:
+            return None
+        depth_vector = self.get_cuboid_depth_vector()
+        if depth_vector[0] >= 0:
+            return self.CUBOID_BACK_RIGHT_EDGE_CENTER
+        return self.CUBOID_BACK_LEFT_EDGE_CENTER
+
+    def get_cuboid_control_point(self, index):
+        if self.shape_type != "cuboid" or len(self.points) < 8:
+            return None
+        if index < len(self.points):
+            return self.points[index]
+        mapping = {
+            self.CUBOID_FRONT_LEFT_EDGE_CENTER: self.get_mid_point(
+                self.points[0], self.points[3]
+            ),
+            self.CUBOID_FRONT_RIGHT_EDGE_CENTER: self.get_mid_point(
+                self.points[1], self.points[2]
+            ),
+            self.CUBOID_FRONT_TOP_EDGE_CENTER: self.get_mid_point(
+                self.points[0], self.points[1]
+            ),
+            self.CUBOID_FRONT_BOTTOM_EDGE_CENTER: self.get_mid_point(
+                self.points[3], self.points[2]
+            ),
+            self.CUBOID_BACK_LEFT_EDGE_CENTER: self.get_mid_point(
+                self.points[4], self.points[7]
+            ),
+            self.CUBOID_BACK_RIGHT_EDGE_CENTER: self.get_mid_point(
+                self.points[5], self.points[6]
+            ),
+        }
+        return mapping.get(index)
+
+    def get_cuboid_visible_control_indices(self):
+        if self.shape_type != "cuboid" or len(self.points) < 8:
+            return []
+        rear_center_index = self.get_cuboid_visible_rear_center_index()
+        return (
+            [0, 1, 2, 3]
+            + self.get_cuboid_visible_rear_edge_indices()
+            + [
+                self.CUBOID_FRONT_LEFT_EDGE_CENTER,
+                self.CUBOID_FRONT_RIGHT_EDGE_CENTER,
+                self.CUBOID_FRONT_TOP_EDGE_CENTER,
+                self.CUBOID_FRONT_BOTTOM_EDGE_CENTER,
+                rear_center_index,
+            ]
+        )
+
+    def pop_point(self):
+        """Remove and return the last point of the shape"""
+        if self.points:
+            return self.points.pop()
+        return None
+
+    def insert_point(self, i, point):
+        """Insert a point to a specific index"""
+        self.points.insert(i, point)
+
+    def remove_point(self, i):
+        """Remove point from a specific index"""
+        self.points.pop(i)
+
+    def is_closed(self):
+        """Check if the shape is closed"""
+        return self._closed
+
+    def set_open(self):
+        """Set shape to open - (_close=False)"""
+        self._closed = False
+
+    def get_rect_from_line(self, pt1, pt2):
+        """Get rectangle from diagonal line"""
+        x1, y1 = pt1.x(), pt1.y()
+        x2, y2 = pt2.x(), pt2.y()
+        return QtCore.QRectF(x1, y1, x2 - x1, y2 - y1)
+
+    def paint(self, painter: QtGui.QPainter):  # noqa: max-complexity: 18
+        """Paint shape using QPainter"""
+        if self.points:
+            color = (
+                self.select_line_color if self.selected else self.line_color
+            )
+            pen = QtGui.QPen(color)
+            # Try using integer sizes for smoother drawing(?)
+            pen.setWidth(max(1, int(round(self.line_width / self.scale))))
+            if self.difficult and self.shape_type != "point":
+                pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+            painter.setPen(pen)
+
+            line_path = QtGui.QPainterPath()
+            vrtx_path = QtGui.QPainterPath()
+
+            if self.shape_type == "rectangle":
+                if len(self.points) not in [1, 2, 4]:
+                    logger.error(
+                        f"Invalid points count for rectangle: "
+                        f"expected 1, 2 or 4, got {len(self.points)}"
+                    )
+                    return
+                if len(self.points) == 2:
+                    rectangle = self.get_rect_from_line(*self.points)
+                    line_path.addRect(rectangle)
+                if len(self.points) == 4:
+                    line_path.moveTo(self.points[0])
+                    for i, p in enumerate(self.points):
+                        line_path.lineTo(p)
+                        if self.selected:
+                            self.draw_vertex(vrtx_path, i)
+                    if self.is_closed() or self.label is not None:
+                        line_path.lineTo(self.points[0])
+            elif self.shape_type == "rotation":
+                if len(self.points) not in [1, 2, 4]:
+                    logger.error(
+                        f"Invalid points count for rotation: "
+                        f"expected 1, 2 or 4, got {len(self.points)}"
+                    )
+                    return
+                if len(self.points) == 2:
+                    rectangle = self.get_rect_from_line(*self.points)
+                    line_path.addRect(rectangle)
+                if len(self.points) == 4:
+                    line_path.moveTo(self.points[0])
+                    for i, p in enumerate(self.points):
+                        line_path.lineTo(p)
+                        if self.selected:
+                            self.draw_vertex(vrtx_path, i)
+                    if self.is_closed() or self.label is not None:
+                        line_path.lineTo(self.points[0])
+            elif self.shape_type == "quadrilateral":
+                if len(self.points) not in [1, 2, 3, 4]:
+                    logger.error(
+                        f"Invalid points count for quadrilateral: "
+                        f"expected 1-4, got {len(self.points)}"
+                    )
+                    return
+                if len(self.points) >= 2:
+                    line_path.moveTo(self.points[0])
+                    for i, p in enumerate(self.points):
+                        line_path.lineTo(p)
+                        if not self.selected:
+                            if i == 0:
+                                self.draw_vertex(vrtx_path, i)
+                        else:
+                            if i != 0:
+                                self.draw_vertex(vrtx_path, i)
+                    if self.is_closed() or self.label is not None:
+                        line_path.lineTo(self.points[0])
+            elif self.shape_type == "cuboid":
+                if len(self.points) in [1, 2]:
+                    return
+                if len(self.points) != 8:
+                    logger.error(
+                        f"Invalid points count for cuboid: expected 8, got {len(self.points)}"
+                    )
+                    return
+                front = [0, 1, 2, 3]
+                back = [4, 5, 6, 7]
+                links = [(0, 4), (1, 5), (2, 6), (3, 7)]
+                line_path.moveTo(self.points[front[0]])
+                for i in front[1:]:
+                    line_path.lineTo(self.points[i])
+                line_path.lineTo(self.points[front[0]])
+                link_path = QtGui.QPainterPath()
+                for i, j in links:
+                    link_path.moveTo(self.points[i])
+                    link_path.lineTo(self.points[j])
+                back_path = QtGui.QPainterPath()
+                back_path.moveTo(self.points[back[0]])
+                for i in back[1:]:
+                    back_path.lineTo(self.points[i])
+                back_path.lineTo(self.points[back[0]])
+                painter.drawPath(link_path)
+                back_pen = QtGui.QPen(pen)
+                back_pen.setStyle(QtCore.Qt.PenStyle.DashLine)
+                painter.setPen(back_pen)
+                painter.drawPath(back_path)
+                painter.setPen(pen)
+                orient_pen = QtGui.QPen(QtGui.QColor(255, 165, 0, 220))
+                orient_pen.setWidth(
+                    max(1, int(round(self.line_width / self.scale)))
+                )
+                painter.setPen(orient_pen)
+                painter.drawLine(self.points[0], self.points[1])
+                painter.setPen(pen)
+                if self.selected or self.hovered:
+                    for i in self.get_cuboid_visible_control_indices():
+                        self.draw_vertex(vrtx_path, i)
+            elif self.shape_type == "circle":
+                if len(self.points) not in [1, 2]:
+                    logger.error(
+                        f"Invalid points count for circle: "
+                        f"expected 1 or 2, got {len(self.points)}"
+                    )
+                    return
+                if len(self.points) == 2:
+                    rectangle = self.get_circle_rect_from_line(self.points)
+                    line_path.addEllipse(rectangle)
+                if self.selected:
+                    for i in range(len(self.points)):
+                        self.draw_vertex(vrtx_path, i)
+            elif self.shape_type == "linestrip":
+                line_path.moveTo(self.points[0])
+                for i, p in enumerate(self.points):
+                    line_path.lineTo(p)
+                    self.draw_vertex(vrtx_path, i)
+            elif self.shape_type == "point":
+                if len(self.points) != 1:
+                    logger.error(
+                        f"Invalid points count for point: "
+                        f"expected 1, got {len(self.points)}"
+                    )
+                    return
+                self.draw_vertex(vrtx_path, 0, True)
+            else:
+                line_path.moveTo(self.points[0])
+                # Uncommenting the following line will draw 2 paths
+                # for the 1st vertex, and make it non-filled, which
+                # may be desirable.
+                self.draw_vertex(vrtx_path, 0)
+
+                for i, p in enumerate(self.points):
+                    line_path.lineTo(p)
+                    if self.selected:
+                        self.draw_vertex(vrtx_path, i)
+                if self.is_closed():
+                    line_path.lineTo(self.points[0])
+
+            painter.drawPath(line_path)
+            painter.drawPath(vrtx_path)
+            if self._vertex_fill_color is not None:
+                painter.fillPath(vrtx_path, self._vertex_fill_color)
+            # Quadrilateral selected: first vertex as outline-only (transparent, no fill)
+            if (
+                self.shape_type == "quadrilateral"
+                and len(self.points) >= 1
+                and self.selected
+            ):
+                d = self.point_size / self.scale
+                p0 = self.points[0]
+                outline_color = (
+                    self.select_line_color
+                    if self.selected
+                    else self.line_color
+                )
+                pen = QtGui.QPen(outline_color)
+                pen.setWidth(max(1, int(round(self.line_width / self.scale))))
+                painter.setPen(pen)
+                painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+                painter.drawEllipse(
+                    QtCore.QPointF(p0.x(), p0.y()), d / 2.0, d / 2.0
+                )
+            if self.fill:
+                color = (
+                    self.select_fill_color
+                    if self.selected
+                    else self.fill_color
+                )
+                painter.fillPath(line_path, color)
+
+            if (
+                self.shape_type == "quadrilateral"
+                and len(self.points) == 4
+                and self.selected
+                and (self.is_closed() or self.label is not None)
+            ):
+                self._draw_quadrilateral_order(painter)
+
+    def _draw_quadrilateral_order(self, painter):
+        """Draw a single arrow on the first edge (0→1) to indicate vertex order."""
+        if len(self.points) != 4:
+            return
+
+        color = QtGui.QColor(0, 0, 0)
+        pen = QtGui.QPen(color)
+        pen.setWidth(max(1, int(round(self.line_width / self.scale))))
+        painter.setPen(pen)
+        painter.setBrush(QtCore.Qt.BrushStyle.NoBrush)
+
+        half_angle_rad = math.radians(40)
+        tip_len = max(4, 10 / self.scale)
+        arm_len = max(5, 12 / self.scale)
+
+        # Only first edge: arrow from point 0 toward point 1
+        from_pt = self.points[0]
+        to_pt = self.points[1]
+        dx = to_pt.x() - from_pt.x()
+        dy = to_pt.y() - from_pt.y()
+        dist = math.sqrt(dx * dx + dy * dy)
+        if dist < 1e-6:
+            return
+        ux, uy = dx / dist, dy / dist
+        angle_rad = math.atan2(dy, dx)
+        mx = (from_pt.x() + to_pt.x()) / 2
+        my = (from_pt.y() + to_pt.y()) / 2
+        tip_x = mx + ux * tip_len
+        tip_y = my + uy * tip_len
+        back1_x = tip_x + arm_len * math.cos(
+            angle_rad + math.pi - half_angle_rad
+        )
+        back1_y = tip_y + arm_len * math.sin(
+            angle_rad + math.pi - half_angle_rad
+        )
+        back2_x = tip_x + arm_len * math.cos(
+            angle_rad + math.pi + half_angle_rad
+        )
+        back2_y = tip_y + arm_len * math.sin(
+            angle_rad + math.pi + half_angle_rad
+        )
+        painter.drawLine(
+            QtCore.QPointF(tip_x, tip_y),
+            QtCore.QPointF(back1_x, back1_y),
+        )
+        painter.drawLine(
+            QtCore.QPointF(tip_x, tip_y),
+            QtCore.QPointF(back2_x, back2_y),
+        )
+
+    def draw_vertex(self, path, i, show_difficult=False):
+        """Draw a vertex"""
+        d = self.point_size / self.scale
+        shape = self.point_type
+        if self.shape_type == "cuboid":
+            point = self.get_cuboid_control_point(i)
+        else:
+            point = self.points[i]
+        if point is None:
+            return
+        if i == self._highlight_index:
+            size, shape = self._highlight_settings[self._highlight_mode]
+            d *= size
+        if self._highlight_index is not None:
+            self._vertex_fill_color = self.hvertex_fill_color
+        else:
+            self._vertex_fill_color = self.vertex_fill_color
+        if shape in (self.P_SQUARE, self.P_ROUND):
+            if self.difficult and show_difficult:
+                scale_factor = 1.5
+                triangle_path = QtGui.QPainterPath()
+                triangle_path.moveTo(
+                    point.x(), point.y() - d * scale_factor / 2
+                )
+                triangle_path.lineTo(
+                    point.x() - d * scale_factor / 2,
+                    point.y() + d * scale_factor / 2,
+                )
+                triangle_path.lineTo(
+                    point.x() + d * scale_factor / 2,
+                    point.y() + d * scale_factor / 2,
+                )
+                triangle_path.closeSubpath()
+                path.addPath(triangle_path)
+                if shape == self.P_ROUND:
+                    path.addPath(triangle_path)
+            else:
+                if shape == self.P_SQUARE:
+                    path.addRect(point.x() - d / 2, point.y() - d / 2, d, d)
+                elif shape == self.P_ROUND:
+                    path.addEllipse(point, d / 2.0, d / 2.0)
+        else:
+            logger.error("Unsupported vertex shape")
+
+    def nearest_vertex(self, point, epsilon):
+        """Find the index of the nearest vertex to a point
+        Only consider if the distance is smaller than epsilon
+        """
+        min_distance = float("inf")
+        min_i = None
+        indices = range(len(self.points))
+        if self.shape_type == "cuboid":
+            indices = range(min(4, len(self.points)))
+        for i in indices:
+            p = self.points[i]
+            dist = utils.distance(p - point)
+            if dist <= epsilon and dist < min_distance:
+                min_distance = dist
+                min_i = i
+        return min_i
+
+    def nearest_edge(self, point, epsilon):
+        """Get nearest edge index"""
+        min_distance = float("inf")
+        post_i = None
+        for i in range(len(self.points)):
+            line = [self.points[i - 1], self.points[i]]
+            dist = utils.distance_to_line(point, line)
+            if dist <= epsilon and dist < min_distance:
+                min_distance = dist
+                post_i = i
+        return post_i
+
+    def contains_point(self, point):
+        """Check if shape contains a point"""
+        if self.shape_type == "cuboid":
+            return self.bounding_rect().contains(point)
+        return self.make_path().contains(point)
+
+    def get_circle_rect_from_line(self, line):
+        """Computes parameters to draw with `QPainterPath::addEllipse`"""
+        if len(line) != 2:
+            return None
+        c, _ = line
+        r = line[0] - line[1]
+        d = math.sqrt(math.pow(r.x(), 2) + math.pow(r.y(), 2))
+        rectangle = QtCore.QRectF(c.x() - d, c.y() - d, 2 * d, 2 * d)
+        return rectangle
+
+    def make_path(self):
+        """Create a path from shape"""
+        if not self.points:
+            return QtGui.QPainterPath()
+        if self.shape_type == "rectangle":
+            path = QtGui.QPainterPath(self.points[0])
+            for p in self.points[1:]:
+                path.lineTo(p)
+        elif self.shape_type == "cuboid":
+            path = QtGui.QPainterPath(self.points[0])
+            if len(self.points) >= 4:
+                for p in self.points[1:4]:
+                    path.lineTo(p)
+                path.closeSubpath()
+            if len(self.points) >= 8:
+                back_path = QtGui.QPainterPath(self.points[4])
+                for p in self.points[5:8]:
+                    back_path.lineTo(p)
+                back_path.closeSubpath()
+                path.addPath(back_path)
+        elif self.shape_type == "circle":
+            path = QtGui.QPainterPath()
+            if len(self.points) == 2:
+                rectangle = self.get_circle_rect_from_line(self.points)
+                path.addEllipse(rectangle)
+        else:
+            path = QtGui.QPainterPath(self.points[0])
+            for p in self.points[1:]:
+                path.lineTo(p)
+        return path
+
+    def bounding_rect(self):
+        """Return bounding rectangle of the shape"""
+        return self.make_path().boundingRect()
+
+    def move_by(self, offset):
+        """Move all points by an offset"""
+        self.points = [p + offset for p in self.points]
+
+    def move_vertex_by(self, i, offset):
+        """Move a specific vertex by an offset"""
+        self.points[i] = self.points[i] + offset
+
+    def highlight_vertex(self, i, action):
+        """Highlight a vertex appropriately based on the current action
+
+        Args:
+            i (int): The vertex index
+            action (int): The action
+            (see Shape.NEAR_VERTEX and Shape.MOVE_VERTEX)
+        """
+        self._highlight_index = i
+        self._highlight_mode = action
+
+    def highlight_clear(self):
+        """Clear the highlighted point"""
+        self._highlight_index = None
+
+    def copy(self):
+        """Copy shape"""
+        return copy.deepcopy(self)
+
+    def __len__(self):
+        return len(self.points)
+
+    def __getitem__(self, key):
+        return self.points[key]
+
+    def __setitem__(self, key, value):
+        self.points[key] = value
