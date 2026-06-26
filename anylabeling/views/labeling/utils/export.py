@@ -14,7 +14,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anylabeling.views.labeling.label_converter import LabelConverter
-from anylabeling.views.labeling.logger import logger
+from anylabeling.views.labeling.logger import logger,error_deal
 from anylabeling.views.labeling.widgets import Popup
 from anylabeling.views.labeling.utils.qt import new_icon_path
 from anylabeling.views.labeling.utils.style import *
@@ -489,7 +489,8 @@ def export_voc_annotation(self, mode):
     except Exception as e:
         message = f"Error occurred while exporting annotations: {str(e)}"
         progress_dialog.close()
-        logger.error(message)
+        # logger.error(message)
+        error_deal(e)
         popup = Popup(
             message,
             self,

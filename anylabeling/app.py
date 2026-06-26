@@ -285,7 +285,7 @@ def main():
     no_auto_update_check = config_from_args.pop("no_auto_update_check", False)
     qt_platform = config_from_args.pop("qt_platform", None)
 
-    logger.setLevel(getattr(logging, logger_level.upper()))
+    # logger.setLevel(getattr(logging, logger_level.upper()))
     logger.info(
         f"🚀 {gradient_text(f'X-AnyLabeling v{__version__} launched!')}"
     )

@@ -1,7 +1,7 @@
 language: en_US
 theme: auto  # auto, light, dark
 model_hub: github  # github, modelscope
-device: null  # CPU, GPU
+device: GPU  # CPU, GPU null
 auto_save: true
 display_label_popup: true
 store_data: false

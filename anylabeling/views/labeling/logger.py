@@ -1,80 +1,77 @@
-import logging
-import sys
-from functools import wraps
-from typing import Callable, Dict
+import traceback
 
-import termcolor
-
-COLORS: Dict[str, str] = {
-    "WARNING": "yellow",
-    "INFO": "white",
-    "DEBUG": "blue",
-    "CRITICAL": "red",
-    "ERROR": "red",
-}
+from loguru import logger
+from typing import List
+from pathlib import Path
+import yaml,os
 
 
-def singleton(cls):
-    instances = {}
+log_config_path = Path("configs/logger_config.yaml").resolve()
+level:str = ''
+show_cmd:bool = True
+default_log_path = Path("logs/label_x.log").resolve()
 
-    @wraps(cls)
-    def get_instance(*args, **kwargs):
-        if cls not in instances:
-            instances[cls] = cls(*args, **kwargs)
-        return instances[cls]
+if os.path.exists(log_config_path):
+    try:
+        with open(log_config_path, mode='r+', encoding='utf-8') as fp:
+            data = yaml.safe_load(fp)
+            level = data['level']
+            show_cmd = data['show_in_cmd']
+    except Exception as e:
+        raise ValueError(f"some error happen: {e}")
+else:
+    raise FileNotFoundError(f"not found file: {log_config_path},please check your config file path")
+# 内存缓存，用于保存日志记录
+log_buffer: List[dict] = []
 
-    return get_instance
+# 移除默认控制台输出
+logger.remove()
 
+# 内存 sink：捕获 LogRecord
+def memory_sink(message):
+    record = message.record
+    log_buffer.append({
+        "time": record["time"].strftime("%Y-%m-%d %H:%M:%S"),
+        "level": record["level"].name,
+        "module": record["name"],
+        "function": record["function"],
+        "line": record["line"],
+        "message": record["message"]
+    })
 
-class ColoredFormatter(logging.Formatter):
-    def __init__(self, fmt: str, use_color: bool = True):
-        super().__init__(fmt)
-        self.use_color = use_color
+# 添加内存 sink（最低 INFO 级别）
+memory_handler_id = logger.add(memory_sink, level="INFO" if level == '' else level)
 
-    def format(self, record: logging.LogRecord) -> str:
-        if self.use_color and record.levelname in COLORS:
-            record = self._color_record(record)
-        record.asctime = self.formatTime(record, self.datefmt)
-        return super().format(record)
+# 可选：保留控制台打印
+if show_cmd:
+    console_handler_id = logger.add(lambda msg: print(msg, end=""), colorize=True)
 
-    def _color_record(self, record: logging.LogRecord) -> logging.LogRecord:
-        def colored(text, color):
-            return termcolor.colored(text, color=color, attrs={"bold": True})
+def dump_logs_to_file(filepath="logs/runtime.log",mode_str:str='a'):
+    """
+    将内存中的日志一次性写入文件，并保持原等级
+    """
+    Path(filepath).parent.mkdir(parents=True, exist_ok=True)
 
-        record.levelname2 = colored(
-            f"{record.levelname:<7}", COLORS[record.levelname]
-        )
-        record.message2 = colored(record.msg, COLORS[record.levelname])
-        record.asctime2 = termcolor.colored(
-            self.formatTime(record, self.datefmt), color="green"
-        )
-        record.module2 = termcolor.colored(record.module, color="cyan")
-        record.funcName2 = termcolor.colored(record.funcName, color="cyan")
-        record.lineno2 = termcolor.colored(record.lineno, color="cyan")
+    # 直接写入文件
+    with open(filepath, mode=mode_str, encoding="utf-8") as f:
+        for record in log_buffer:
+            f.write(f"{record['time']} | {record['level']} | "
+                    f"{record['module']}:{record['function']}:{record['line']} -- 【{record['message']}】\n")
 
-        return record
-
-
-@singleton
-class AppLogger:
-    def __init__(self, name="X-AnyLabeling"):
-        self.logger = logging.getLogger(name)
-        self.logger.propagate = False
-        self._setup_handler()
-
-    def _setup_handler(self):
-        stream_handler = logging.StreamHandler(sys.stderr)
-        handler_format = ColoredFormatter(
-            "%(asctime)s | %(levelname2)s | %(module2)s:%(funcName2)s:%(lineno2)s - %(message2)s"
-        )
-        stream_handler.setFormatter(handler_format)
-        self.logger.addHandler(stream_handler)
-
-    def __getattr__(self, name: str) -> Callable:
-        return getattr(self.logger, name)
-
-    def set_level(self, level: str):
-        self.logger.setLevel(level)
+    # 清空内存缓存
+    log_buffer.clear()
 
 
-logger = AppLogger()
+
+def error_deal(e,log_path:str or Path=None):
+    logger.error(f'error:{e}, detail:\n{traceback.format_exc()}')
+    if log_path and Path(log_path).is_file():
+        dump_logs_to_file(filepath=log_path, mode_str='a')
+    return e
+
+
+if __name__ == '__main__':
+    logger.info('test')
+    dump_logs_to_file(mode_str='w+')
+
+

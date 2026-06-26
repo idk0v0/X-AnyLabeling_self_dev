@@ -4,6 +4,7 @@ import os
 import os.path as osp
 import time
 import yaml
+from pathlib import Path    # 后增
 
 from PyQt6 import QtWidgets
 from PyQt6.QtCore import Qt, QThread, pyqtSignal
@@ -14,7 +15,7 @@ from PyQt6.QtWidgets import (
 )
 
 from anylabeling.views.labeling.label_converter import LabelConverter
-from anylabeling.views.labeling.logger import logger
+from anylabeling.views.labeling.logger import logger,error_deal
 from anylabeling.views.labeling.widgets import Popup
 from anylabeling.views.labeling.utils.qt import new_icon_path
 from anylabeling.views.labeling.utils.style import *
@@ -1267,7 +1268,9 @@ def upload_voc_annotation(self, mode):
     label_dir_path = path_edit.text()
     image_dir_path = osp.dirname(self.filename)
     label_file_list = os.listdir(label_dir_path)
-    output_dir_path = self.output_dir if self.output_dir else image_dir_path
+    # 修改保存文件夹位置
+    output_dir_path = self.output_dir if self.output_dir else str(Path(Path(image_dir_path).parent, "Annotations_json"))
+    Path(output_dir_path).mkdir(parents=True, exist_ok=True)
     converter = LabelConverter()
 
     response = QtWidgets.QMessageBox()
@@ -1305,9 +1308,9 @@ def upload_voc_annotation(self, mode):
             image_filename = osp.basename(image_path)
             label_filename = osp.splitext(image_filename)[0] + ".xml"
             if label_filename not in label_file_list:
-
+                logger.warning(f"can`t match file_name:{label_filename},pass it")
                 continue
-
+            # logger.debug(f"loading {i} files")
             input_file = osp.join(label_dir_path, label_filename)
             output_file = osp.join(
                 output_dir_path, osp.splitext(image_filename)[0] + ".json"
@@ -1343,8 +1346,8 @@ def upload_voc_annotation(self, mode):
     except Exception as e:
         progress_dialog.close()
         message = f"Error occurred while uploading annotations: {str(e)}"
-        logger.error(message)
-
+        # logger.error(message)
+        error_deal(e)
         popup = Popup(
             message,
             self,

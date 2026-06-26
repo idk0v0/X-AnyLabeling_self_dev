@@ -18,6 +18,7 @@ from datetime import date
 from itertools import chain
 from PIL import Image
 from typing import Any, Dict, List
+from pathlib import Path        #后增
 
 from anylabeling.app_info import __version__
 from anylabeling.views.labeling.logger import logger
@@ -658,6 +659,8 @@ class LabelConverter:
         self.save_json(self.custom_data, output_file)
 
     def voc_to_custom(self, input_file, output_file, image_filename, mode):
+        from anylabeling.plugin.img_tools import img_read_safe
+
         self.reset()
 
         tree = ET.parse(input_file)
@@ -669,8 +672,23 @@ class LabelConverter:
             raise ValueError(
                 f"Missing <size> element in VOC XML: {input_file}"
             )
-        image_width = int(size_width.text)
-        image_height = int(size_height.text)
+        if isinstance(size_width.text, str) or isinstance(size_height.text, str):
+            logger.info(f'({Path(input_file).stem}) your VOC format is invalid, size_width is str, try to convert it by img_path')
+            try:
+                image_file_path = Path(Path(input_file).parents[1],"JPEGImages",image_filename)
+                if image_file_path.is_file():
+                    im = img_read_safe(image_file_path)
+                    image_height, image_width = im.shape[:2]
+                else:
+                    e = FileNotFoundError(f"({image_filename}) can`t find your image file form VOC folder(JPEGImages, Annotations).plz check your dir struct "
+                                      f"or fix VOCxml(repair size/width 、 size/height to int) ")
+                    raise e
+            except Exception as e:
+                logger.error(f"Failed to read image: {image_filename},because of error: {e}")
+                raise e
+        elif isinstance(size_width.text,int) or isinstance(size_height.text,int):
+            image_width = int(size_width.text)
+            image_height = int(size_height.text)
 
         filename_elem = root.find("filename")
         if filename_elem is not None and filename_elem.text:
@@ -1402,7 +1420,12 @@ class LabelConverter:
     def custom_to_voc(
         self, image_file, input_file, output_dir, mode, skip_empty_files=False
     ):
+        # fix : repair file which is not image tend to the attribute Error: 'NoneType' object has no attribute 'shape'
+        from anylabeling.plugin import Static
         is_emtpy_file = True
+        if not Path(image_file).suffix in Static.IMG_EXT_USUALLY:
+            logger.info(f"Skipping {image_file}, because it does not have an image extension({Path(image_file).suffix}).")
+            return is_emtpy_file
         image = self.imread_unicode(image_file, 1)[0]
         image_height, image_width, image_depth = image.shape
         if osp.exists(input_file):

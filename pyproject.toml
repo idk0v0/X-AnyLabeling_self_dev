@@ -91,6 +91,7 @@ dependencies = [
     "requests",
     "darkdetect>=0.8.0",
     "matplotlib",
+    "loguru"
 ]
 
 # Optional dependencies ------------------------------------------------------------------------------------------------
