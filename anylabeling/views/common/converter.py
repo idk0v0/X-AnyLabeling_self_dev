@@ -6,10 +6,11 @@ from pathlib import Path
 from termcolor import colored
 from tqdm import tqdm
 
+
 sys.path.append(str(Path(__file__).parent.parent.parent.parent))
 
 from anylabeling.views.labeling.label_converter import LabelConverter
-from anylabeling.views.labeling.logger import logger
+from anylabeling.views.labeling.logger import logger,error_deal
 
 IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".bmp", ".webp", ".tif", ".tiff"]
 LABEL_EXTENSIONS = {
@@ -640,15 +641,20 @@ def run_conversion(
                     base_name = osp.splitext(osp.basename(label_file))[0]
                     output_file = osp.join(output, base_name + xlabel_ext)
 
-                    if mode == "detect":
-                        converter.voc_to_custom(
-                            label_file, output_file, "", "rectangle"
-                        )
-                    elif mode == "segment":
-                        converter.voc_to_custom(
-                            label_file, output_file, "", "polygon"
-                        )
-                    count += 1
+                    try:
+                        if mode == "detect":
+                            converter.voc_to_custom(
+                                label_file, output_file, "", "rectangle"
+                            )
+                        elif mode == "segment":
+                            converter.voc_to_custom(
+                                label_file, output_file, "", "polygon"
+                            )
+                        count += 1
+                    except Exception as e:
+                        error_deal(e)
+                        continue
+
 
                 print(
                     colored(
